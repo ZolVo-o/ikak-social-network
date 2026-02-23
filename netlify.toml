@@ -10,7 +10,3 @@
   from = "/*"
   to = "/index.html"
   status = 200
-
-git remote add origin https://github.com/ВАШ_ЮЗЕРНЕЙМ/ikak-social-network.git
-git branch -M main
-git push -u origin main
