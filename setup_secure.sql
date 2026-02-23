@@ -337,7 +337,7 @@ $$;
 -- Создаем профиль для ТЕБЯ (подставь свой UID)
 INSERT INTO public.profiles (id, username, display_name, avatar_url)
 VALUES (
-  'bddfe89-18b3-4638-90ec-d960eaab8680',
+  'bddffe89-18b1-4638-90ec-d960eaab8680',
   'zol_vo',
   'Зол Во',
   'https://ikak.ru/default-avatar.png'
@@ -378,7 +378,7 @@ CREATE TRIGGER on_auth_user_created
   EXECUTE FUNCTION public.handle_new_user();
 
 -- Проверка твоего профиля
-SELECT * FROM profiles WHERE id = 'bddfe89-18b3-4638-90ec-d960eaab8680';
+SELECT * FROM profiles WHERE id = 'bddffe89-18b1-4638-90ec-d960eaab8680';
 
 -- =============================================
 -- ГОТОВО! База данных полностью защищена.
