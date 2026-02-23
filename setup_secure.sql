@@ -331,6 +331,34 @@ $$;
 -- 3. Settings > Authentication > Rate Limits > Настройте лимиты
 
 -- =============================================
+-- АВТОМАТИЧЕСКОЕ СОЗДАНИЕ ПРОФИЛЯ ПРИ РЕГИСТРАЦИИ
+-- =============================================
+
+-- Функция для создания профиля при регистрации
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO public.profiles (id, username, display_name, avatar_url)
+  VALUES (
+    NEW.id,
+    LOWER(SPLIT_PART(NEW.email, '@', 1)),
+    COALESCE(NEW.raw_user_meta_data->>'display_name', 'Пользователь'),
+    'https://api.dicebear.com/9.x/avataaars/svg?seed=' || NEW.id
+  );
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Удаляем старый триггер если есть
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+
+-- Триггер на создание пользователя
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW
+  EXECUTE FUNCTION public.handle_new_user();
+
+-- =============================================
 -- ГОТОВО! База данных полностью защищена.
 -- =============================================
 
