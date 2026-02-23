@@ -334,29 +334,51 @@ $$;
 -- АВТОМАТИЧЕСКОЕ СОЗДАНИЕ ПРОФИЛЯ ПРИ РЕГИСТРАЦИИ
 -- =============================================
 
--- Функция для создания профиля при регистрации
+-- Создаем профиль для ТЕБЯ (подставь свой UID)
+INSERT INTO public.profiles (id, username, display_name, avatar_url)
+VALUES (
+  'bddfe89-18b3-4638-90ec-d960eaab8680',
+  'zol_vo',
+  'Зол Во',
+  'https://ikak.ru/default-avatar.png'
+)
+ON CONFLICT (id) DO NOTHING;
+
+-- Создаст профили для всех, у кого их нет
+INSERT INTO public.profiles (id, username, display_name, avatar_url)
+SELECT 
+  au.id,
+  LOWER(SPLIT_PART(au.email, '@', 1)) || '_' || floor(random() * 1000)::text,
+  COALESCE(au.raw_user_meta_data->>'display_name', 'Пользователь'),
+  'https://ikak.ru/default-avatar.png'
+FROM auth.users au
+LEFT JOIN public.profiles p ON au.id = p.id
+WHERE p.id IS NULL;
+
+-- Функция для автоматического создания профиля
 CREATE OR REPLACE FUNCTION public.handle_new_user()
 RETURNS TRIGGER AS $$
 BEGIN
   INSERT INTO public.profiles (id, username, display_name, avatar_url)
   VALUES (
     NEW.id,
-    LOWER(SPLIT_PART(NEW.email, '@', 1)),
+    LOWER(SPLIT_PART(NEW.email, '@', 1)) || '_' || floor(random() * 1000)::text,
     COALESCE(NEW.raw_user_meta_data->>'display_name', 'Пользователь'),
-    'https://api.dicebear.com/9.x/avataaars/svg?seed=' || NEW.id
+    'https://ikak.ru/default-avatar.png'
   );
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
--- Удаляем старый триггер если есть
+-- Триггер
 DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
-
--- Триггер на создание пользователя
 CREATE TRIGGER on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW
   EXECUTE FUNCTION public.handle_new_user();
+
+-- Проверка твоего профиля
+SELECT * FROM profiles WHERE id = 'bddfe89-18b3-4638-90ec-d960eaab8680';
 
 -- =============================================
 -- ГОТОВО! База данных полностью защищена.
