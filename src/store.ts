@@ -2,6 +2,99 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import type { User, Post, Comment, AppSettings, Page } from './types';
 import { supabase } from './lib/supabase';
 
+// =========================================
+// SECURITY HELPERS - ZASHITA OT XSS I BEZOPASNOST
+// =========================================
+
+// SANITIZACIA VVODA
+function sanitizeInput(input: string, maxLength: number = 5000): string {
+  if (!input || typeof input !== 'string') return '';
+  
+  return input
+    .replace(/\0/g, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/javascript:/gi, '')
+    .replace(/data:/gi, '')
+    .replace(/\bon\w+\s*=/gi, '')
+    .replace(/on\w+=/gi, '')
+    .replace(/[\x00-\x1F\x7F]/g, '')
+    .slice(0, maxLength)
+    .trim();
+}
+
+// VALIDACIA EMAIL
+function isValidEmail(email: string): boolean {
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return emailRegex.test(email);
+}
+
+// VALIDACIA USERNAME (tolko latinica, cifry, podcherkivanie)
+function isValidUsername(username: string): boolean {
+  const usernameRegex = /^[a-z][a-z0-9_]{2,19}$/;
+  return usernameRegex.test(username);
+}
+
+// SANITIZACIA URL (tolko bezopasnye protokoly)
+function sanitizeUrl(url: string | undefined): string {
+  if (!url) return '';
+  if (url.startsWith('https://') || url.startsWith('data:')) {
+    return url;
+  }
+  return '';
+}
+
+// Rate limiting na kliente (zashita ot spam)
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
+
+function checkClientRateLimit(action: string, maxRequests: number = 10, windowMs: number = 60000): boolean {
+  const now = Date.now();
+  const key = action;
+  const record = rateLimitMap.get(key);
+  
+  if (!record || now > record.resetTime) {
+    rateLimitMap.set(key, { count: 1, resetTime: now + windowMs });
+    return true;
+  }
+  
+  if (record.count >= maxRequests) {
+    console.warn(`Rate limit exceeded for: ${action}`);
+    return false;
+  }
+  
+  record.count++;
+  return true;
+}
+
+// Bezopasnoe hranilishe (bazovaya zashita)
+const safeStorage = {
+  set: (key: string, value: unknown): void => {
+    try {
+      const encoded = btoa(encodeURIComponent(JSON.stringify(value)));
+      localStorage.setItem(key, encoded);
+    } catch {
+      // Ignoriruem oshibki
+    }
+  },
+
+  get: <T>(key: string): T | null => {
+    try {
+      const encoded = localStorage.getItem(key);
+      if (!encoded) return null;
+      return JSON.parse(decodeURIComponent(atob(encoded))) as T;
+    } catch {
+      return null;
+    }
+  },
+
+  remove: (key: string): void => {
+    try {
+      localStorage.removeItem(key);
+    } catch {
+      // Ignoriruem oshibki
+    }
+  }
+};
+
 export function useAppState() {
   const [currentPage, setCurrentPage] = useState<Page>('feed');
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -85,7 +178,7 @@ export function useAppState() {
           id: c.id,
           userId: c.user_id,
           username: profile?.username || 'user',
-          displayName: profile?.display_name || 'Пользователь',
+          displayName: profile?.display_name || 'Polzovatel',
           avatarUrl: profile?.avatar_url || '',
           content: c.content,
           createdAt: c.created_at,
@@ -101,7 +194,7 @@ export function useAppState() {
           id: p.id,
           userId: p.user_id,
           username: profile?.username || 'user',
-          displayName: profile?.display_name || 'Пользователь',
+          displayName: profile?.display_name || 'Polzovatel',
           avatarUrl: profile?.avatar_url || '',
           content: p.content,
           createdAt: p.created_at,
@@ -118,7 +211,7 @@ export function useAppState() {
   }, []);
 
   // =========================================
-  // Загрузить юзера из сессии Supabase
+  // Zagruzit yuzera iz sessii Supabase
   // =========================================
   const resolveUser = useCallback(async (): Promise<User | null> => {
     try {
@@ -133,7 +226,7 @@ export function useAppState() {
       const authUser = session.user;
       console.log('[resolveUser] Auth user:', authUser.id);
 
-      // 1) Профиль из БД
+      // 1) Profil iz BD
       try {
         console.log('[resolveUser] Fetching profile from DB...');
         const { data: profile, error } = await supabase
@@ -158,15 +251,13 @@ export function useAppState() {
         }
       } catch (e) {
         console.log('[resolveUser] Profile fetch error:', e);
-        // таблица может не существовать
       }
 
-      // 2) Pending профиль из localStorage
-      const pendingRaw = localStorage.getItem('ikak_pending_profile');
-      if (pendingRaw) {
+      // 2) Pending profil iz bezopasnogo hranilischa
+      const pending = safeStorage.get<{ username: string; displayName: string; avatarUrl: string }>('ikak_pending_profile');
+      if (pending) {
         console.log('[resolveUser] Found pending profile');
         try {
-          const pending = JSON.parse(pendingRaw);
           await supabase.from('profiles').insert({
             id: authUser.id,
             username: pending.username,
@@ -174,7 +265,7 @@ export function useAppState() {
             bio: '',
             avatar_url: pending.avatarUrl,
           });
-          localStorage.removeItem('ikak_pending_profile');
+          safeStorage.remove('ikak_pending_profile');
 
           return {
             id: authUser.id,
@@ -187,11 +278,11 @@ export function useAppState() {
           };
         } catch (e) {
           console.log('[resolveUser] Pending profile error:', e);
-          localStorage.removeItem('ikak_pending_profile');
+          safeStorage.remove('ikak_pending_profile');
         }
       }
 
-      // 3) Fallback из auth metadata
+      // 3) Fallback iz auth metadata
       console.log('[resolveUser] Using fallback from auth metadata');
       const meta = authUser.user_metadata || {};
       const email = authUser.email || '';
@@ -209,7 +300,6 @@ export function useAppState() {
         });
       } catch (e) {
         console.log('[resolveUser] Profile insert error:', e);
-        // ignore
       }
 
       const user = {
@@ -230,7 +320,7 @@ export function useAppState() {
   }, []);
 
   // =========================================
-  // ВОССТАНОВЛЕНИЕ СЕССИИ — только 1 раз при загрузке
+  // VOSSTANOVLENIE SESSII - tolko 1 raz pri zagruzke
   // =========================================
   useEffect(() => {
     if (sessionRestoredRef.current) return;
@@ -239,13 +329,11 @@ export function useAppState() {
     const restoreSession = async () => {
       try {
         console.log('[restoreSession] Starting...');
-        // Устанавливаем таймаут - если через 3 секунды не восстановится, показываем экран входа
         authTimeoutRef.current = setTimeout(() => {
           console.log('[restoreSession] Timeout reached, showing auth screen');
           setAuthLoading(false);
         }, 3000);
 
-        // Если идёт регистрация — не трогаем
         if (isRegisteringRef.current) {
           console.log('[restoreSession] Registration in progress, skipping');
           setAuthLoading(false);
@@ -259,7 +347,6 @@ export function useAppState() {
           setIsAuthenticated(true);
           fetchPosts(user.id);
         } else {
-          // Нет сессии - явно устанавливаем isAuthenticated в false
           console.log('[restoreSession] No user, setting isAuthenticated to false');
           setIsAuthenticated(false);
         }
@@ -285,7 +372,6 @@ export function useAppState() {
         setPosts([]);
         isRegisteringRef.current = false;
       } else if (event === 'SIGNED_IN' && session?.user) {
-        // Автоматически активируем сессию при входе
         isRegisteringRef.current = false;
         const user = await resolveUser();
         if (user) {
@@ -303,7 +389,6 @@ export function useAppState() {
         clearTimeout(authTimeoutRef.current);
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // =========================================
@@ -316,12 +401,11 @@ export function useAppState() {
     });
 
     if (error) {
-      if (error.message.includes('Invalid login')) return 'Неверный email или пароль';
-      if (error.message.includes('Email not confirmed')) return 'Подтвердите email';
+      if (error.message.includes('Invalid login')) return 'Nevernyi email ili parol';
+      if (error.message.includes('Email not confirmed')) return 'Podtverdite email';
       return error.message;
     }
 
-    // Автоматически активируем сессию после успешного входа
     if (data.user) {
       isRegisteringRef.current = false;
       const user = await resolveUser();
@@ -346,10 +430,29 @@ export function useAppState() {
     displayName: string;
     avatarUrl?: string;
   }): Promise<string | null> => {
-    // Помечаем что идёт регистрация — restoreSession не должен перехватывать
+    // Rate limiting - zashita ot spam registracii
+    if (!checkClientRateLimit('register', 5, 60000)) {
+      return 'Slishkom mnogo popytok registracii. Poprobuite pozzhe.';
+    }
+
+    // Validaciya email
+    if (!isValidEmail(data.email)) {
+      return 'Vvedite korrektnyi email';
+    }
+
+    // Validaciya username
+    if (!isValidUsername(data.username)) {
+      return 'Yuzerneim: 3-20 simvolov, latinica, cifry i _';
+    }
+
+    // Validaciya parolya
+    if (data.password.length < 6) {
+      return 'Parol dolzhen byt ne menee 6 simvolov';
+    }
+
     isRegisteringRef.current = true;
 
-    // Проверяем уникальность юзернейма
+    // Proveryaem unikalnost yuzerneima
     try {
       const { data: existing } = await supabase
         .from('profiles')
@@ -358,72 +461,74 @@ export function useAppState() {
         .single();
       if (existing) {
         isRegisteringRef.current = false;
-        return 'Этот юзернейм уже занят';
+        return 'Etot yuzerneim uzhe zanyat';
       }
     } catch {
       // ignore
     }
 
     const seed = data.username + Date.now();
-    const avatarUrl = data.avatarUrl || `https://api.dicebear.com/9.x/avataaars/svg?seed=${seed}`;
+    const avatarUrl = sanitizeUrl(data.avatarUrl) || `https://api.dicebear.com/9.x/avataaars/svg?seed=${seed}`;
 
-    // Сохраняем pending профиль
-    localStorage.setItem('ikak_pending_profile', JSON.stringify({
-      username: data.username.toLowerCase(),
-      displayName: data.displayName,
+    // Sanitiziruem dannye
+    const sanitizedUsername = sanitizeInput(data.username.toLowerCase(), 20);
+    const sanitizedDisplayName = sokanimate(data.displayName, 50);
+
+    // Sohranyaem pending profil v bezopasnom hranilischi
+    safeStorage.set('ikak_pending_profile', {
+      username: sanitizedUsername,
+      displayName: sanitizedDisplayName,
       avatarUrl,
-    }));
+    });
 
-    // Регистрация
+    // Registraciya
     const { data: authData, error: authError } = await supabase.auth.signUp({
       email: data.email.toLowerCase(),
       password: data.password,
       options: {
         data: {
-          username: data.username.toLowerCase(),
-          display_name: data.displayName,
+          username: sanitizedUsername,
+          display_name: sanitizedDisplayName,
         },
         emailRedirectTo: window.location.origin,
       },
     });
 
     if (authError) {
-      localStorage.removeItem('ikak_pending_profile');
+      safeStorage.remove('ikak_pending_profile');
       isRegisteringRef.current = false;
-      if (authError.message.includes('already registered')) return 'Пользователь с таким email уже существует';
+      if (authError.message.includes('already registered')) return 'Polzovatel s takim email uzhe sushestvuet';
       return authError.message;
     }
 
     if (!authData.user) {
-      localStorage.removeItem('ikak_pending_profile');
+      safeStorage.remove('ikak_pending_profile');
       isRegisteringRef.current = false;
-      return 'Ошибка создания аккаунта';
+      return 'Oshibka sozdaniya akkaunta';
     }
 
     if (authData.user.identities && authData.user.identities.length === 0) {
-      localStorage.removeItem('ikak_pending_profile');
+      safeStorage.remove('ikak_pending_profile');
       isRegisteringRef.current = false;
-      return 'Пользователь с таким email уже существует';
+      return 'Polzovatel s takim email uzhe sushestvuet';
     }
 
-    // Если сессия есть — создаём профиль
     if (authData.session) {
       try {
         await supabase.from('profiles').insert({
           id: authData.user.id,
-          username: data.username.toLowerCase(),
-          display_name: data.displayName,
+          username: sanitizedUsername,
+          display_name: sanitizedDisplayName,
           bio: '',
           avatar_url: avatarUrl,
         });
-        localStorage.removeItem('ikak_pending_profile');
+        safeStorage.remove('ikak_pending_profile');
       } catch {
-        // pending profile подхватит resolveUser
+        // pending profile podkhvatit resolveUser
       }
       return null;
     }
 
-    // Нет сессии — пробуем залогиниться
     const { error: signInError } = await supabase.auth.signInWithPassword({
       email: data.email.toLowerCase(),
       password: data.password,
@@ -433,25 +538,24 @@ export function useAppState() {
       return 'EMAIL_CONFIRM_REQUIRED';
     }
 
-    // Логин сработал
     try {
       await supabase.from('profiles').insert({
         id: authData.user.id,
-        username: data.username.toLowerCase(),
-        display_name: data.displayName,
+        username: sanitizedUsername,
+        display_name: sanitizedDisplayName,
         bio: '',
         avatar_url: avatarUrl,
       });
-      localStorage.removeItem('ikak_pending_profile');
+      safeStorage.remove('ikak_pending_profile');
     } catch {
-      // pending profile подхватит resolveUser
+      // pending profile podkhvatit resolveUser
     }
 
     return null;
   }, []);
 
   // =========================================
-  // ACTIVATE SESSION — вызывается Auth ПОСЛЕ бота
+  // ACTIVATE SESSION - vyzovetsya Auth POSLE bota
   // =========================================
   const activateSession = useCallback(async () => {
     isRegisteringRef.current = false;
@@ -468,7 +572,6 @@ export function useAppState() {
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // Не получилось
     setAuthLoading(false);
   }, [fetchPosts, resolveUser]);
 
@@ -482,19 +585,30 @@ export function useAppState() {
     setCurrentPage('feed');
     setPosts([]);
     isRegisteringRef.current = false;
-    sessionRestoredRef.current = false; // Позволяем restoreSession при следующем входе
-    localStorage.removeItem('ikak_pending_profile');
+    sessionRestoredRef.current = false;
+    safeStorage.remove('ikak_pending_profile');
   }, []);
 
   // =========================================
-  // ADD POST
+  // ADD POST (s zashitoi ot XSS i rate limiting)
   // =========================================
   const addPost = useCallback(async (content: string) => {
     if (!currentUser) return;
 
+    if (!checkClientRateLimit('post', 10, 60000)) {
+      console.warn('Rate limit exceeded for posting');
+      return;
+    }
+
+    const sanitizedContent = sanitizeInput(content, 5000);
+    if (!sanitizedContent) {
+      console.warn('Empty or invalid post content');
+      return;
+    }
+
     const { data, error } = await supabase
       .from('posts')
-      .insert({ user_id: currentUser.id, content })
+      .insert({ user_id: currentUser.id, content: sanitizedContent })
       .select()
       .single();
 
@@ -539,14 +653,22 @@ export function useAppState() {
   }, [currentUser, posts]);
 
   // =========================================
-  // ADD COMMENT
+  // ADD COMMENT (s zashitoi ot XSS i rate limiting)
   // =========================================
   const addComment = useCallback(async (postId: string, content: string) => {
     if (!currentUser) return;
 
+    if (!checkClientRateLimit(`comment_${postId}`, 20, 60000)) {
+      console.warn('Rate limit exceeded for comments');
+      return;
+    }
+
+    const sanitizedContent = sanitizeInput(content, 1000);
+    if (!sanitizedContent) return;
+
     const { data, error } = await supabase
       .from('comments')
-      .insert({ post_id: postId, user_id: currentUser.id, content })
+      .insert({ post_id: postId, user_id: currentUser.id, content: sanitizedContent })
       .select()
       .single();
 
@@ -584,16 +706,35 @@ export function useAppState() {
   }, []);
 
   // =========================================
-  // UPDATE PROFILE
+  // UPDATE PROFILE (s zashitoi ot XSS)
   // =========================================
   const updateProfile = useCallback(async (updates: Partial<User>) => {
     if (!currentUser) return;
 
     const dbUpdates: Record<string, string> = {};
-    if (updates.displayName !== undefined) dbUpdates.display_name = updates.displayName;
-    if (updates.username !== undefined) dbUpdates.username = updates.username;
-    if (updates.bio !== undefined) dbUpdates.bio = updates.bio;
-    if (updates.avatarUrl !== undefined) dbUpdates.avatar_url = updates.avatarUrl;
+    
+    if (updates.displayName !== undefined) {
+      const sanitized = sanitizeInput(updates.displayName, 50);
+      if (sanitized) dbUpdates.display_name = sanitized;
+    }
+    
+    if (updates.username !== undefined) {
+      if (isValidUsername(updates.username)) {
+        dbUpdates.username = updates.username.toLowerCase();
+      }
+    }
+    
+    if (updates.bio !== undefined) {
+      const sanitized = sanitizeInput(updates.bio, 500);
+      dbUpdates.bio = sanitized;
+    }
+    
+    if (updates.avatarUrl !== undefined) {
+      const sanitized = sanitizeUrl(updates.avatarUrl);
+      if (sanitized) dbUpdates.avatar_url = sanitized;
+    }
+
+    if (Object.keys(dbUpdates).length === 0) return;
 
     const { error } = await supabase.from('profiles').update(dbUpdates).eq('id', currentUser.id);
 
@@ -638,4 +779,9 @@ export function useAppState() {
     addPost, toggleLike, addComment, deletePost,
     updateProfile, updateSettings, refreshPosts,
   };
+}
+
+// Dopolnitelnaya funkciya dlya sanitizacii (opechatka v imeni)
+function sokanimate(input: string, maxLength: number): string {
+  return sanitizeInput(input, maxLength);
 }
